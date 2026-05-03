@@ -1,6 +1,5 @@
 import { Resend } from "resend";
-
-const resend = new Resend(process.env.RESEND_API_KEY);
+import nodemailer from "nodemailer";
 
 const departmentLabels = {
   cardiology: "Cardiology",
@@ -11,6 +10,80 @@ const departmentLabels = {
   ophthalmology: "Ophthalmology",
 };
 
+/**
+ * Send email using Resend (Primary method)
+ */
+async function sendWithResend(
+  data,
+  hospitalEmail,
+  hospitalName,
+  formattedDate,
+) {
+  const resend = new Resend(process.env.RESEND_API_KEY);
+
+  // Send to hospital
+  const hospitalEmailResult = await resend.emails.send({
+    from: `${hospitalName} <appointments@yourdomain.com>`,
+    to: hospitalEmail,
+    subject: `🔔 New Appointment Booking - ${data.fullName}`,
+    html: generateHospitalEmailHTML(data, formattedDate, hospitalName),
+    tags: [{ name: "category", value: "appointment" }],
+  });
+
+  // Send confirmation to patient
+  const patientEmailResult = await resend.emails.send({
+    from: `${hospitalName} <appointments@yourdomain.com>`,
+    to: data.email,
+    subject: `✅ Appointment Confirmation - ${hospitalName}`,
+    html: generatePatientConfirmationHTML(data, formattedDate, hospitalName),
+    tags: [{ name: "category", value: "confirmation" }],
+  });
+
+  return { hospitalEmailResult, patientEmailResult };
+}
+
+/**
+ * Send email using Nodemailer (Fallback method)
+ */
+async function sendWithNodemailer(
+  data,
+  hospitalEmail,
+  hospitalName,
+  formattedDate,
+) {
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT || "587"),
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+
+  // Send to hospital
+  const hospitalMailOptions = {
+    from: `"${hospitalName}" <${process.env.SMTP_USER}>`,
+    to: hospitalEmail,
+    subject: `🔔 New Appointment Booking - ${data.fullName}`,
+    html: generateHospitalEmailHTML(data, formattedDate, hospitalName),
+  };
+
+  // Send confirmation to patient
+  const patientMailOptions = {
+    from: `"${hospitalName}" <${process.env.SMTP_USER}>`,
+    to: data.email,
+    subject: `✅ Appointment Confirmation - ${hospitalName}`,
+    html: generatePatientConfirmationHTML(data, formattedDate, hospitalName),
+  };
+
+  await transporter.sendMail(hospitalMailOptions);
+  await transporter.sendMail(patientMailOptions);
+}
+
+/**
+ * Main email sending function
+ */
 export async function sendAppointmentEmail(data) {
   const hospitalEmail = process.env.HOSPITAL_EMAIL;
   const hospitalName = process.env.HOSPITAL_NAME || "CarePlus Medical Center";
@@ -30,26 +103,34 @@ export async function sendAppointmentEmail(data) {
   );
 
   try {
-    // Send email to hospital
-    await resend.emails.send({
-      from: `${hospitalName} <appointments@yourdomain.com>`,
-      to: hospitalEmail,
-      subject: `New Appointment Booking - ${data.fullName}`,
-      html: generateHospitalEmailHTML(data, formattedDate, hospitalName),
-    });
-
-    // Send confirmation to patient
-    await resend.emails.send({
-      from: `${hospitalName} <appointments@yourdomain.com>`,
-      to: data.email,
-      subject: `Appointment Confirmation - ${hospitalName}`,
-      html: generatePatientConfirmationHTML(data, formattedDate, hospitalName),
-    });
-
-    return { success: true, message: "Appointment booked successfully" };
+    // Try Resend first, fallback to Nodemailer
+    if (process.env.RESEND_API_KEY) {
+      console.log("📧 Sending emails via Resend...");
+      const result = await sendWithResend(
+        data,
+        hospitalEmail,
+        hospitalName,
+        formattedDate,
+      );
+      console.log("✅ Emails sent via Resend");
+      return { success: true, method: "resend" };
+    } else if (process.env.SMTP_HOST && process.env.SMTP_USER) {
+      console.log("📧 Sending emails via Nodemailer SMTP...");
+      await sendWithNodemailer(
+        data,
+        hospitalEmail,
+        hospitalName,
+        formattedDate,
+      );
+      console.log("✅ Emails sent via Nodemailer");
+      return { success: true, method: "nodemailer" };
+    } else {
+      console.warn("⚠️ Email configuration missing. Skipping email sending.");
+      return { success: false, method: "none", reason: "Email not configured" };
+    }
   } catch (error) {
-    console.error("Email sending failed:", error);
-    throw new Error("Failed to send confirmation emails");
+    console.error("❌ Email sending failed:", error);
+    throw new Error(`Failed to send email: ${error.message}`);
   }
 }
 
@@ -59,55 +140,73 @@ function generateHospitalEmailHTML(data, formattedDate, hospitalName) {
     <html>
     <head>
       <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #1e40af; color: white; padding: 20px; text-align: center; }
-        .content { padding: 20px; background-color: #f9fafb; }
-        .field { margin-bottom: 15px; }
-        .label { font-weight: bold; color: #374151; }
-        .value { color: #111827; }
-        .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .header { background: linear-gradient(135deg, #1e40af, #1d4ed8); color: white; padding: 30px 20px; text-align: center; }
+        .header h1 { margin: 0; font-size: 24px; }
+        .urgent-badge { display: inline-block; background: #fee2e2; color: #991b1b; padding: 5px 15px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-top: 10px; }
+        .content { padding: 30px 20px; background-color: #ffffff; }
+        .info-table { width: 100%; border-collapse: collapse; }
+        .info-table td { padding: 12px 8px; border-bottom: 1px solid #e5e7eb; }
+        .info-table td:first-child { font-weight: bold; color: #374151; width: 40%; }
+        .info-table td:last-child { color: #111827; }
+        .message-box { background: #f3f4f6; padding: 15px; border-left: 4px solid #1d4ed8; margin-top: 20px; }
+        .footer { background: #f9fafb; padding: 20px; text-align: center; color: #6b7280; font-size: 14px; }
+        .action-buttons { margin-top: 20px; text-align: center; }
+        .btn { display: inline-block; padding: 12px 24px; margin: 5px; border-radius: 8px; text-decoration: none; font-weight: bold; }
+        .btn-confirm { background: #059669; color: white; }
+        .btn-contact { background: #1d4ed8; color: white; }
       </style>
     </head>
     <body>
       <div class="container">
         <div class="header">
-          <h1>New Appointment Booking</h1>
+          <h1>🚨 New Appointment Request</h1>
+          <div class="urgent-badge">ACTION REQUIRED</div>
         </div>
         <div class="content">
-          <div class="field">
-            <div class="label">Patient Name:</div>
-            <div class="value">${data.fullName}</div>
-          </div>
-          <div class="field">
-            <div class="label">Email:</div>
-            <div class="value">${data.email}</div>
-          </div>
-          <div class="field">
-            <div class="label">Phone:</div>
-            <div class="value">${data.phone}</div>
-          </div>
-          <div class="field">
-            <div class="label">Department:</div>
-            <div class="value">${departmentLabels[data.department]}</div>
-          </div>
-          <div class="field">
-            <div class="label">Preferred Date:</div>
-            <div class="value">${formattedDate}</div>
-          </div>
+          <table class="info-table">
+            <tr>
+              <td>👤 Patient Name</td>
+              <td>${data.fullName}</td>
+            </tr>
+            <tr>
+              <td>📧 Email</td>
+              <td>${data.email}</td>
+            </tr>
+            <tr>
+              <td>📱 Phone</td>
+              <td>${data.phone}</td>
+            </tr>
+            <tr>
+              <td>🏥 Department</td>
+              <td><strong>${departmentLabels[data.department]}</strong></td>
+            </tr>
+            <tr>
+              <td>📅 Preferred Date</td>
+              <td>${formattedDate}</td>
+            </tr>
+          </table>
+          
           ${
             data.message
               ? `
-          <div class="field">
-            <div class="label">Message:</div>
-            <div class="value">${data.message}</div>
+          <div class="message-box">
+            <strong>📝 Patient Message:</strong><br>
+            ${data.message}
           </div>
           `
               : ""
           }
+          
+          <div class="action-buttons">
+            <a href="tel:${data.phone}" class="btn btn-confirm">📞 Call Patient</a>
+            <a href="mailto:${data.email}" class="btn btn-contact">✉️ Email Patient</a>
+          </div>
         </div>
         <div class="footer">
-          <p>This is an automated notification from ${hospitalName}</p>
+          <p>This is an automated notification from ${hospitalName} Appointment System</p>
+          <p>Appointment ID: ${data._id || "N/A"}</p>
         </div>
       </div>
     </body>
@@ -121,28 +220,57 @@ function generatePatientConfirmationHTML(data, formattedDate, hospitalName) {
     <html>
     <head>
       <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background-color: #059669; color: white; padding: 20px; text-align: center; }
-        .content { padding: 20px; background-color: #f9fafb; }
-        .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 14px; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .header { background: linear-gradient(135deg, #059669, #10b981); color: white; padding: 30px 20px; text-align: center; }
+        .content { padding: 30px 20px; background-color: #ffffff; }
+        .info-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        .info-table td { padding: 10px; border-bottom: 1px solid #e5e7eb; }
+        .info-table td:first-child { font-weight: bold; color: #374151; }
+        .next-steps { background: #f0fdf4; padding: 15px; border-radius: 8px; margin-top: 20px; }
+        .footer { background: #f9fafb; padding: 20px; text-align: center; color: #6b7280; font-size: 14px; }
       </style>
     </head>
     <body>
       <div class="container">
         <div class="header">
-          <h1>Appointment Request Received</h1>
+          <h1>✅ Appointment Request Received!</h1>
         </div>
         <div class="content">
-          <p>Dear ${data.fullName},</p>
-          <p>Thank you for requesting an appointment at ${hospitalName}. We have received your booking request for:</p>
-          <p><strong>Department:</strong> ${departmentLabels[data.department]}</p>
-          <p><strong>Preferred Date:</strong> ${formattedDate}</p>
-          <p>Our team will review your request and contact you shortly at ${data.phone} or ${data.email} to confirm your appointment.</p>
-          <p>If you have any questions, please don't hesitate to contact us.</p>
+          <p>Dear <strong>${data.fullName}</strong>,</p>
+          <p>Thank you for choosing <strong>${hospitalName}</strong>. Your appointment request has been received successfully!</p>
+          
+          <table class="info-table">
+            <tr>
+              <td>Department</td>
+              <td>${departmentLabels[data.department]}</td>
+            </tr>
+            <tr>
+              <td>Preferred Date</td>
+              <td>${formattedDate}</td>
+            </tr>
+            <tr>
+              <td>Status</td>
+              <td><span style="color: #f59e0b;">⏳ Pending Confirmation</span></td>
+            </tr>
+          </table>
+          
+          <div class="next-steps">
+            <h3>What's Next?</h3>
+            <ol>
+              <li>Our team will review your request</li>
+              <li>We'll contact you at <strong>${data.phone}</strong> within 24 hours</li>
+              <li>You'll receive a final appointment confirmation</li>
+            </ol>
+          </div>
+          
+          <p>If you need to make any changes or have questions, please contact us:</p>
+          <p>📞 Phone: +1 (555) 123-4567</p>
+          <p>📧 Email: ${process.env.HOSPITAL_EMAIL}</p>
         </div>
         <div class="footer">
-          <p>Best regards,<br>${hospitalName} Team</p>
+          <p>Best regards,<br><strong>${hospitalName} Team</strong></p>
+          <p>This is an automated confirmation. Please do not reply to this email.</p>
         </div>
       </div>
     </body>
